@@ -3,6 +3,7 @@ from __future__ import annotations
 """Phase A: RAGAS Production Evaluation — 50q, 3 distributions, cluster analysis."""
 
 import json
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -90,12 +91,10 @@ def save_phase_a_report(results: list[RagasResult], clusters: dict,
         "total_questions": len(results),
         "per_distribution": per_dist,
         "failure_clusters": clusters,
-        "bottom_10": [
-            {"rank": i + 1, "question_id": r.question_id, "distribution": r.distribution,
-             "question": r.question, "avg_score": round(r.avg_score, 4),
-             "worst_metric": r.worst_metric}
-            for i, r in enumerate(sorted(results, key=lambda x: x.avg_score)[:10])
-        ],
+        "overall_avg_score": round(
+            sum(result.avg_score for result in results) / len(results), 4
+        ) if results else 0.0,
+        "bottom_10": bottom_10(results),
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -110,12 +109,13 @@ def group_by_distribution(test_set: list[dict]) -> dict[str, list[dict]]:
     Returns:
         {"factual": [...], "multi_hop": [...], "adversarial": [...]}
     """
-    # TODO: Implement
-    # groups = {"factual": [], "multi_hop": [], "adversarial": []}
-    # for item in test_set:
-    #     groups[item["distribution"]].append(item)
-    # return groups
-    return {"factual": [], "multi_hop": [], "adversarial": []}
+    groups = {"factual": [], "multi_hop": [], "adversarial": []}
+    for item in test_set:
+        distribution = item.get("distribution")
+        if distribution not in groups:
+            raise ValueError(f"Unknown distribution: {distribution!r}")
+        groups[distribution].append(item)
+    return groups
 
 
 def run_ragas_50q(answers: list[dict]) -> list[RagasResult]:
@@ -130,32 +130,50 @@ def run_ragas_50q(answers: list[dict]) -> list[RagasResult]:
         3. Kết hợp kết quả với distribution info từ answers list
         4. Return list[RagasResult]
     """
-    # TODO: Implement
-    # try:
-    #     from src.m4_eval import evaluate_ragas
-    # except ImportError:
-    #     print("⚠️  Không tìm thấy src/m4_eval.py — đã copy từ Day 18 chưa?")
-    #     return []
-    #
-    # questions     = [a["question"]    for a in answers]
-    # ans_texts     = [a["answer"]      for a in answers]
-    # contexts      = [a["contexts"]    for a in answers]
-    # ground_truths = [a["ground_truth"] for a in answers]
-    #
-    # raw = evaluate_ragas(questions, ans_texts, contexts, ground_truths)
-    # per_q = raw.get("per_question", [])
-    #
-    # results = []
-    # for a, pq in zip(answers, per_q):
-    #     results.append(RagasResult(
-    #         question_id=a["id"], distribution=a["distribution"],
-    #         question=a["question"], answer=a["answer"],
-    #         contexts=a["contexts"], ground_truth=a["ground_truth"],
-    #         faithfulness=pq.faithfulness, answer_relevancy=pq.answer_relevancy,
-    #         context_precision=pq.context_precision, context_recall=pq.context_recall,
-    #     ))
-    # return results
-    return []
+    if not answers:
+        return []
+
+    required = {"id", "distribution", "question", "answer", "contexts", "ground_truth"}
+    for index, answer in enumerate(answers):
+        missing = required - answer.keys()
+        if missing:
+            raise ValueError(f"Answer #{index} is missing fields: {sorted(missing)}")
+
+    from src.m4_eval import evaluate_ragas
+
+    raw = evaluate_ragas(
+        [a["question"] for a in answers],
+        [a["answer"] for a in answers],
+        [a["contexts"] for a in answers],
+        [a["ground_truth"] for a in answers],
+    )
+    per_question = raw.get("per_question", [])
+    if len(per_question) != len(answers):
+        raise RuntimeError(
+            f"RAGAS returned {len(per_question)} per-question results for "
+            f"{len(answers)} answers"
+        )
+
+    def score(item, name: str) -> float:
+        value = item.get(name) if isinstance(item, dict) else getattr(item, name)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return 0.0 if math.isnan(numeric) else max(0.0, min(1.0, numeric))
+
+    return [
+        RagasResult(
+            question_id=answer["id"], distribution=answer["distribution"],
+            question=answer["question"], answer=answer["answer"],
+            contexts=answer["contexts"], ground_truth=answer["ground_truth"],
+            faithfulness=score(evaluation, "faithfulness"),
+            answer_relevancy=score(evaluation, "answer_relevancy"),
+            context_precision=score(evaluation, "context_precision"),
+            context_recall=score(evaluation, "context_recall"),
+        )
+        for answer, evaluation in zip(answers, per_question)
+    ]
 
 
 def bottom_10(results: list[RagasResult]) -> list[dict]:
@@ -166,24 +184,17 @@ def bottom_10(results: list[RagasResult]) -> list[dict]:
           "question": ..., "avg_score": ..., "worst_metric": ...,
           "diagnosis": ..., "suggested_fix": ...}, ...]
     """
-    # TODO: Implement
-    # sorted_asc = sorted(results, key=lambda r: r.avg_score)
-    # bottom = sorted_asc[:10]
-    # output = []
-    # for i, r in enumerate(bottom):
-    #     diag, fix = DIAGNOSTIC_TREE[r.worst_metric]
-    #     output.append({
-    #         "rank": i + 1,
-    #         "question_id": r.question_id,
-    #         "distribution": r.distribution,
-    #         "question": r.question,
-    #         "avg_score": round(r.avg_score, 4),
-    #         "worst_metric": r.worst_metric,
-    #         "diagnosis": diag,
-    #         "suggested_fix": fix,
-    #     })
-    # return output
-    return []
+    output = []
+    for rank, result in enumerate(sorted(results, key=lambda item: item.avg_score)[:10], 1):
+        diagnosis, suggested_fix = DIAGNOSTIC_TREE[result.worst_metric]
+        output.append({
+            "rank": rank, "question_id": result.question_id,
+            "distribution": result.distribution, "question": result.question,
+            "avg_score": round(result.avg_score, 4),
+            "worst_metric": result.worst_metric, "diagnosis": diagnosis,
+            "suggested_fix": suggested_fix,
+        })
+    return output
 
 
 def cluster_analysis(results: list[RagasResult]) -> dict:
@@ -204,25 +215,46 @@ def cluster_analysis(results: list[RagasResult]) -> dict:
           "insight": "..."
         }
     """
-    # TODO: Implement
-    # matrix = {
-    #     metric: {"factual": 0, "multi_hop": 0, "adversarial": 0}
-    #     for metric in DIAGNOSTIC_TREE
-    # }
-    # for r in results:
-    #     matrix[r.worst_metric][r.distribution] += 1
-    #
-    # # Find dominant failure
-    # dominant_dist   = max(["factual", "multi_hop", "adversarial"],
-    #                       key=lambda d: sum(matrix[m][d] for m in matrix))
-    # dominant_metric = max(matrix, key=lambda m: sum(matrix[m].values()))
-    # insight = (f"Distribution '{dominant_dist}' có nhiều failure nhất. "
-    #            f"Metric '{dominant_metric}' là điểm yếu chủ đạo. "
-    #            f"Gợi ý: {DIAGNOSTIC_TREE[dominant_metric][1]}")
-    #
-    # return {"matrix": matrix, "dominant_failure_distribution": dominant_dist,
-    #         "dominant_failure_metric": dominant_metric, "insight": insight}
-    return {}
+    distributions = ("factual", "multi_hop", "adversarial")
+    matrix = {
+        metric: {distribution: 0 for distribution in distributions}
+        for metric in DIAGNOSTIC_TREE
+    }
+    for result in results:
+        if result.distribution not in distributions:
+            raise ValueError(f"Unknown distribution: {result.distribution!r}")
+        matrix[result.worst_metric][result.distribution] += 1
+
+    # Every question contributes exactly one cell, so summing the matrix by
+    # distribution would merely reproduce the 20/20/10 dataset sizes. The
+    # distribution with the lowest mean score is the meaningful failure signal.
+    distribution_scores = {
+        distribution: [
+            result.avg_score for result in results
+            if result.distribution == distribution
+        ]
+        for distribution in distributions
+    }
+    populated = {
+        distribution: scores
+        for distribution, scores in distribution_scores.items() if scores
+    }
+    dominant_distribution = min(
+        populated,
+        key=lambda distribution: sum(populated[distribution]) / len(populated[distribution]),
+    ) if populated else "factual"
+    dominant_metric = max(matrix, key=lambda metric: sum(matrix[metric].values()))
+    insight = (
+        f"Distribution '{dominant_distribution}' có nhiều failure nhất; "
+        f"'{dominant_metric}' là metric yếu chủ đạo. "
+        f"Khuyến nghị ưu tiên: {DIAGNOSTIC_TREE[dominant_metric][1]}."
+    )
+    return {
+        "matrix": matrix,
+        "dominant_failure_distribution": dominant_distribution,
+        "dominant_failure_metric": dominant_metric,
+        "insight": insight,
+    }
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

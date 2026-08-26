@@ -8,3 +8,9 @@ venv/
 answers_50q.json
 reports/*.json
 !reports/.gitkeep
+
+# Lab deliverables: keep the reproducible evaluation artifacts in the submission.
+!answers_50q.json
+!reports/ragas_50q.json
+!reports/judge_results.json
+!reports/guard_results.json

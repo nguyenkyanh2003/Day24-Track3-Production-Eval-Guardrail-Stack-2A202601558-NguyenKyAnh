@@ -53,7 +53,10 @@ def build_pipeline():
                 "metadata": {**child.metadata, "parent_id": child.parent_id},
             })
 
-    enriched = enrich_chunks(all_chunks)
+    # Keep setup deterministic and inexpensive. Source/parent metadata already
+    # carries the context needed by retrieval; LLM enrichment would add one API
+    # request per chunk before the actual 50-question evaluation.
+    enriched = enrich_chunks(all_chunks, methods=[])
     if enriched:
         all_chunks = [{"text": e.enriched_text, "metadata": e.auto_metadata} for e in enriched]
         print(f"  ✓ Enriched {len(enriched)} chunks ({time.time()-t0:.1f}s)")
@@ -75,22 +78,41 @@ def build_pipeline():
 
 
 def run_query(q: str, search, reranker, top_k: int) -> tuple[str, list[str]]:
-    from config import OPENAI_API_KEY
+    from config import (LLM_API_KEY, LLM_MODEL, OPENAI_BASE_URL,
+                        RERANK_CANDIDATE_K)
 
     results = search.search(q)
-    docs    = [{"text": r.text, "score": r.score, "metadata": r.metadata} for r in results]
+    docs = [
+        {"text": result.text, "score": result.score, "metadata": result.metadata}
+        for result in results[:RERANK_CANDIDATE_K]
+    ]
     reranked = reranker.rerank(q, docs, top_k=top_k)
-    contexts = [r.text for r in reranked] if reranked else [r.text for r in results[:3]]
+    selected = reranked if reranked else results[:3]
+    contexts = []
+    seen = set()
+    for result in selected:
+        metadata = result.metadata
+        context = metadata.get("parent_text") or result.text
+        source = metadata.get("source", "")
+        context = f"[Nguồn: {source}]\n{context}" if source else context
+        if context not in seen:
+            seen.add(context)
+            contexts.append(context)
 
-    if OPENAI_API_KEY and contexts:
+    if LLM_API_KEY and contexts:
         try:
             from openai import OpenAI
-            client = OpenAI()
+            client = OpenAI(api_key=LLM_API_KEY, base_url=OPENAI_BASE_URL or None)
             ctx = "\n\n".join(contexts)
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=LLM_MODEL,
                 messages=[
-                    {"role": "system", "content": "Trả lời CHỈ dựa trên context. Nếu không có → nói 'Không tìm thấy.'"},
+                    {"role": "system", "content": (
+                        "Trả lời bằng tiếng Việt, CHỈ dựa trên context. Ưu tiên chính sách "
+                        "mới/hiện hành khi có xung đột phiên bản. Với câu hỏi có-không, "
+                        "trả lời trực tiếp trước khi giải thích. Với câu tính toán, nêu phép "
+                        "tính. Nếu context không đủ, nói 'Không tìm thấy.' Tối đa 4 câu."
+                    )},
                     {"role": "user",   "content": f"Context:\n{ctx}\n\nCâu hỏi: {q}"},
                 ],
             )

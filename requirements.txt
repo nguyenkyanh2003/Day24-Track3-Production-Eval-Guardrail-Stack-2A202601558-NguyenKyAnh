@@ -11,6 +11,7 @@ langchain-community>=0.2,<0.3
 langchain-openai>=0.1,<0.2
 datasets>=2.19
 openai>=1.30
+pytest>=8,<10                      # Lab checkpoint test runner
 
 # ── Day 24 new: LLM Judge ────────────────────────────────────────────────────
 scipy>=1.11                      # Cohen's κ calculation
@@ -19,7 +20,7 @@ scipy>=1.11                      # Cohen's κ calculation
 presidio-analyzer>=2.2           # PII detection engine
 presidio-anonymizer>=2.2         # PII anonymization
 spacy>=3.7                       # Required by presidio-analyzer
-nemoguardrails>=0.9              # NeMo Guardrails (topic + content rails via LLM API)
+nemoguardrails>=0.23,<0.24       # Windows wheels; supports the Colang config without compiling annoy
 
 # After pip install, run:
 #   python -m spacy download en_core_web_lg
